@@ -1,0 +1,170 @@
+name: LLVM Build
+on: [push, pull_request]
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+            id: win
+            arch: x86_64
+          - os: ubuntu-latest
+            name: Linux
+            id: linux
+            arch: x86_64
+          - os: macos-14
+            name: MacOS
+            id: macos
+            arch: aarch64
+          - os: macos-13
+            name: MacOS (x86)
+            id: macos
+            arch: x86_64
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Fetch Current Date Time
+        uses: Kaven-Universe/github-action-current-date-time@v1.4.0
+        id: time
+        with:
+          format: "YYYYMMDDHHmmss"
+
+      - uses: actions/checkout@v4
+
+      - name: Install CMake, Python, 7zip, psutil (Windows)
+        if: matrix.id == 'win'
+        run: |
+          choco install -y cmake python3 7zip
+          RefreshEnv.cmd
+          regsvr32 "%VSINSTALLDIR%\DIA SDK\bin\msdia140.dll"
+          regsvr32 "%VSINSTALLDIR%\DIA SDK\bin\amd64\msdia140.dll"
+          pip install psutil
+
+      - name: Setup Make, CMake, Ninja (Linux)
+        if: matrix.id == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential make cmake
+          sudo wget -qO /usr/local/bin/ninja.gz https://github.com/ninja-build/ninja/releases/latest/download/ninja-linux.zip
+          sudo gunzip /usr/local/bin/ninja.gz
+          sudo chmod a+x /usr/local/bin/ninja
+
+      - name: Install Ninja (MacOS)
+        if: matrix.id == 'macos'
+        run: brew install ninja
+
+      - name: Checkout LLVM
+        run: git clone --single-branch --depth 1 --branch main https://github.com/llvm/llvm-project $GITHUB_WORKSPACE/llvm-project
+
+
+      - name: Build LLVM (Windows)
+        if: matrix.id == 'win'
+        run: |
+          mkdir build
+          mkdir install
+          cmake `
+            -S "$GITHUB_WORKSPACE\llvm-project\llvm" `
+            -B ".\build" `
+            -G "Visual Studio 17 2022" `
+            -Thost=x64 `
+            -A x64 `
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64" `
+            -DLLVM_ENABLE_PROJECTS="lld;clang" `
+            -DLLVM_STATIC_LINK_CXX_STDLIB=true `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX=".\install"
+          cmake --build .\build --target INSTALL --config Release -j
+
+
+      - name: Build LLVM (Linux)
+        if: matrix.id == 'linux'
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/llvm-project/build \
+            && cd $GITHUB_WORKSPACE/llvm-project/build \
+            && git checkout main \
+            && cmake -G "Ninja" -S ../llvm \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/llvm-main" \
+              -DCMAKE_BUILD_TYPE="Release" \
+              -DLLVM_TARGETS_TO_BUILD="X86;AArch64;ARM;PowerPC;RISCV" \
+              -DLLVM_ENABLE_ASSERTIONS=ON \
+              -DLLVM_ENABLE_PROJECTS="clang;lld" \
+              -DLLVM_INCLUDE_TESTS=Off \
+              -DLLVM_INCLUDE_EXAMPLES=Off \
+              -DLLVM_OPTIMIZED_TABLEGEN=On \
+            && ninja -C . install
+
+      - name: Build LLVM (MacOS)
+        if: matrix.id == 'macos'
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/llvm-project/build \
+            && cd $GITHUB_WORKSPACE/llvm-project/build \
+            && git checkout main \
+            && cmake -G "Ninja" -S ../llvm \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/llvm-main" \
+              -DCMAKE_BUILD_TYPE="Release" \
+              -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+              -DLLVM_ENABLE_ASSERTIONS=ON \
+              -DLLVM_ENABLE_PROJECTS="clang;lld" \
+              -DLLVM_INCLUDE_TESTS=Off \
+              -DLLVM_INCLUDE_EXAMPLES=Off \
+              -DLLVM_OPTIMIZED_TABLEGEN=On \
+              -DLLVM_ENABLE_ZLIB=OFF \
+              -DLLVM_ENABLE_ZSTD=OFF \
+            && ninja -C . install
+
+      - name: Package (Windows)
+        if: matrix.id == 'win'
+        run: |
+          7z a -mx9 "LLVM-main-win64.exe" ".\install\*"
+
+      - name: Package (Linux)
+        if: matrix.id == 'linux'
+        run: |
+          pushd $GITHUB_WORKSPACE/llvm-main \
+            && tar -cJf $GITHUB_WORKSPACE/clang+llvm-main-x86_64-linux.tar.xz \
+               . \
+            && ls $GITHUB_WORKSPACE \
+            && popd
+
+      - name: Package (MacOS)
+        if: matrix.id == 'macos'
+        run: |
+          pushd $GITHUB_WORKSPACE/llvm-main \
+            && tar -cJf $GITHUB_WORKSPACE/clang+llvm-main-${{ matrix.arch }}-apple-darwin.tar.xz \
+               . \
+            && ls $GITHUB_WORKSPACE \
+            && popd
+
+      - name: Upload Release (Windows)
+        if: matrix.id == 'win'
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          tag: latest
+          name: LLVM main ${{ steps.time.outputs.time }}
+          makeLatest: false
+          artifacts: LLVM-main-win64.exe
+
+      - name: Upload Release (Linux)
+        if: matrix.id == 'linux'
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          tag: latest
+          name: LLVM main ${{ steps.time.outputs.time }}
+          makeLatest: false
+          artifacts: clang+llvm-main-x86_64-linux.tar.xz
+
+      - name: Upload Release (MacOS)
+        if: matrix.id == 'macos'
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          tag: latest
+          name: LLVM main ${{ steps.time.outputs.time }}
+          makeLatest: false
+          artifacts: clang+llvm-main-${{ matrix.arch }}-apple-darwin.tar.xz
